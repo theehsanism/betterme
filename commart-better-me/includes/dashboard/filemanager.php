@@ -120,7 +120,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['file'])) {
   
   
   
-  <form class="file-upload-form" id="uploadForm">
+  <form class="file-upload-form" id="idfield">
   <label for="file" class="file-upload-field">
     <div class="file-upload-design">
       <svg  viewBox="0 0 24 24" height="1em" >
