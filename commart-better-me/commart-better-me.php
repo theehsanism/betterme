@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Commart Better Me
  * Plugin URI: https://example.com/
- * Description: A custom plugin to add a management menu with Contacts, Campaign, License sections, a dashboard shortcode, and several custom database tables.
+ * Description: A custom plugin to add a management menu with Contacts, Campaign, License sections, a dashboard shortcode, and several custom database tables. Also integrates FTP upload functionality.
  * Version: 1.1.2
  * Author: CommartEhsan2
  * Author URI: https://example.com/
@@ -35,12 +35,11 @@ require_once plugin_dir_path(__FILE__) . 'includes/dashboard/lib/ajax-functions.
 require_once plugin_dir_path(__FILE__) . 'includes/dashboard/lib/ajax-task.php';
 require_once plugin_dir_path(__FILE__) . 'includes/dashboard/lib/ajax-filemanager.php';
 
-// اضافه کردن فایل FTP Upload
+// Include the FTP Upload functionality
 require_once plugin_dir_path(__FILE__) . 'includes/dashboard/lib/ftp-upload.php';
 
-
 /**
- * Function: Create a dedicated folder for the current user.
+ * Create a dedicated folder for the current user.
  * This function checks if the user is logged in and whether a folder under the defined storage path 
  * exists using the user's ID as the folder name. If not, it creates the folder.
  */
@@ -49,14 +48,16 @@ function commart_create_user_folder() {
         $user_id = get_current_user_id();
         $user_folder = COMMART_FILE_STORAGE_DIR . '/' . $user_id;
         if ( ! file_exists( $user_folder ) ) {
-            // wp_mkdir_p creates directory recursively if not available.
+            // wp_mkdir_p creates directory recursively.
             wp_mkdir_p( $user_folder );
         }
     }
 }
-// Hook the function to 'init' so it runs on every page load when a user is logged in.
 add_action( 'init', 'commart_create_user_folder' );
 
+/**
+ * Install plugin database tables.
+ */
 function commart_better_me_install() {
     global $wpdb;
     $charset_collate = $wpdb->get_charset_collate();
@@ -70,11 +71,33 @@ function commart_better_me_install() {
     $employer_brands_table    = $wpdb->prefix . 'commart_better_me_employer_brands';
     $projects_table           = $wpdb->prefix . 'commart_better_me_projects';
     $tasks_table              = $wpdb->prefix . 'commart_better_me_tasks';
-   
-    $myfile_table             = $wpdb->prefix . 'commart_better_me_myfile';
+    $filemanager_table        = $wpdb->prefix . 'commart_better_me_filemanager';
     $employer_profiles_table  = $wpdb->prefix . 'commart_better_me_employer_profiles';
-    
-   
+
+    // Additional table for file details (optional)
+    $myfile_table             = $wpdb->prefix . 'commart_better_me_myfile';
+
+    // Define SQL for file manager table (FTP uploaded files)
+    $sql_filemanager = "CREATE TABLE $filemanager_table (
+        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_id BIGINT(20) UNSIGNED NOT NULL,
+        filename VARCHAR(255) NOT NULL,
+        unique_id VARCHAR(12) NOT NULL,
+        remote_file VARCHAR(255) NOT NULL,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        FOREIGN KEY (user_id) REFERENCES {$wpdb->prefix}users(ID) ON DELETE CASCADE
+    ) $charset_collate;";
+
+    // Define SQL for myfile table (if you want to store additional file details)
+    $sql_myfile = "CREATE TABLE $myfile_table (
+        id BIGINT(20) UNSIGNED NOT NULL AUTO_INCREMENT,
+        file_manager_id BIGINT(20) UNSIGNED NOT NULL,
+        file_description TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (id),
+        FOREIGN KEY (file_manager_id) REFERENCES $filemanager_table(id) ON DELETE CASCADE
+    ) $charset_collate;";
 
     // SQL for other tables
     $sql_targets = "CREATE TABLE $targets_table (
@@ -129,7 +152,7 @@ function commart_better_me_install() {
         reported_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         PRIMARY KEY (id),
         FOREIGN KEY (step_id) REFERENCES $steps_table(id) ON DELETE CASCADE,
-        FOREIGN KEY (attached_file) REFERENCES $files_table(id) ON DELETE SET NULL,
+        FOREIGN KEY (attached_file) REFERENCES $filemanager_table(id) ON DELETE SET NULL,
         FOREIGN KEY (reported_by) REFERENCES {$wpdb->prefix}users(ID) ON DELETE CASCADE
     ) $charset_collate;";
 
@@ -209,6 +232,7 @@ function commart_better_me_install() {
     ) $charset_collate;";
 
     require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+    // Run DB upgrade with all SQL queries
     dbDelta($sql_filemanager);
     dbDelta($sql_myfile);
     dbDelta($sql_targets);
@@ -224,13 +248,13 @@ function commart_better_me_install() {
 register_activation_hook(__FILE__, 'commart_better_me_install');
 
 /**
- * Function to insert user details into the custom table upon login.
+ * Function to store user details into a custom table upon login.
  */
 function commart_better_me_store_user_details( $user_login, $user ) {
     global $wpdb;
     $table_users = $wpdb->prefix . 'commart_better_me';
     // Check if a record for this user already exists.
-    $existing = $wpdb->get_var( $wpdb->prepare("SELECT COUNT(*) FROM $table_users WHERE user_id = %d", $user->ID));
+    $existing = $wpdb->get_var( $wpdb->prepare("SELECT COUNT(*) FROM $table_users WHERE user_id = %d", $user->ID ));
     if ( $existing == 0 ) {
         $profile_image = get_avatar_url($user->ID);
         $wpdb->insert(
@@ -248,7 +272,7 @@ function commart_better_me_store_user_details( $user_login, $user ) {
 add_action('wp_login', 'commart_better_me_store_user_details', 10, 2);
 
 /**
- * Enqueue scripts and localize our AJAX settings with nonces.
+ * Enqueue plugin assets and localize AJAX settings.
  */
 function commart_better_me_enqueue_assets( $hook ) {
     $plugin_pages = [ 'toplevel_page_commart-better-me', 'commart-contacts', 'commart-campaign', 'commart-license' ];
@@ -257,7 +281,6 @@ function commart_better_me_enqueue_assets( $hook ) {
             'commart-better-me-styles',
             plugins_url('includes/css/styles.css', __FILE__)
         );
-         
         wp_enqueue_style(
             'commart-chat-style',
             plugins_url('includes/css/chatstyle.css', __FILE__)
@@ -283,41 +306,38 @@ function commart_better_me_enqueue_assets( $hook ) {
             null,
             true
         );
-
         wp_enqueue_script(
             'commart-task-script',
             plugins_url('includes/dashboard/lib/task-script.js', __FILE__),
-            array('jquery'),
+            ['jquery'],
             null,
             true
         );
-         wp_enqueue_script(
-            'commart-timer-script',
+        wp_enqueue_script(
+            'commart-upload-fix-script',
             plugins_url('includes/dashboard/lib/upload-fix.js', __FILE__),
             ['jquery'],
             null,
             true
         );
-        
         wp_enqueue_script(
-            'commart-timer-script',
+            'commart-filemanager-script',
             plugins_url('includes/dashboard/lib/filemanager-script.js', __FILE__),
             ['jquery'],
             null,
             true
         );
-        
-        
+
         wp_localize_script( 'commart-task-script', 'commartTask', array(
             'ajaxurl' => admin_url('admin-ajax.php'),
-            'nonce'   => wp_create_nonce('commart_task_nonce')
+            'nonce'   => wp_create_nonce('commart_task_nonce'),
         ) );
     }
 }
 add_action('admin_enqueue_scripts', 'commart_better_me_enqueue_assets');
 
 /**
- * Main plugin class.
+ * Main Plugin Class.
  */
 class CommartBetterMe {
 
@@ -405,9 +425,9 @@ class CommartBetterMe {
             COMMART_BETTER_ME_PLUGIN_URL . 'includes/css/dashboard.css'
         );
         wp_enqueue_style(
-    'commart-filemanager-style',
-    COMMART_BETTER_ME_PLUGIN_URL . 'includes/css/filemanager.css'
-);
+            'commart-filemanager-style',
+            COMMART_BETTER_ME_PLUGIN_URL . 'includes/css/filemanager.css'
+        );
         wp_enqueue_style(
             'commart-chat-style',
             COMMART_BETTER_ME_PLUGIN_URL . 'includes/css/chatstyle.css'
