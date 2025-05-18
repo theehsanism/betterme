@@ -1,46 +1,121 @@
 <?php
+session_start();
 
-// Ensure uploads directory exists
-$uploadDir = __DIR__ . '/uploads';
-if (!is_dir($uploadDir)) {
-    mkdir($uploadDir, 0755, true);
-}
+// Assume that user authentication is already performed.
+// For demonstration purposes, we use a fixed user ID.
+// In production, replace this with the actual authenticated user's ID.
+$userId = isset($_SESSION['user_id']) ? $_SESSION['user_id'] : 'pz21301';
+
+// FTP settings for the download host
+$ftp_server     = '185.204.197.5';
+$ftp_username   = 'pz21301';
+$ftp_password   = 'jsFP4CT2';
+// Remote base directory on the download host (adjust according to server settings)
+$remoteBaseDir  = '/public_html/betterme/';
 
 // Function to generate a unique 12-character security ID
 function generateRandomId($length = 12) {
     return substr(bin2hex(random_bytes($length)), 0, $length);
 }
 
+// Function to establish FTP connection and prepare user's folder on remote host
+function setupFtpUserDir($ftp_server, $ftp_username, $ftp_password, $remoteBaseDir, $userId) {
+    // Connect to FTP server
+    $conn_id = ftp_connect($ftp_server);
+    if (!$conn_id) {
+        return [ 'error' => "Could not connect to FTP server." ];
+    }
+    // Login with provided credentials
+    if (!ftp_login($conn_id, $ftp_username, $ftp_password)) {
+        ftp_close($conn_id);
+        return [ 'error' => "FTP login failed." ];
+    }
+    // Enable passive mode if needed
+    ftp_pasv($conn_id, true);
+
+    // Construct user's remote directory path
+    $userRemoteDir = rtrim($remoteBaseDir, '/') . '/' . $userId;
+    
+    // Check if the user's folder exists
+    $dirList = ftp_nlist($conn_id, $remoteBaseDir);
+    $folderExists = false;
+    if ($dirList !== false) {
+        foreach ($dirList as $dir) {
+            // Compare folder names after trimming any redundant slashes
+            if (trim($dir, "/") === trim($userRemoteDir, "/")) {
+                $folderExists = true;
+                break;
+            }
+        }
+    }
+    // If folder does not exist, create it
+    if (!$folderExists) {
+        if (!ftp_mkdir($conn_id, $userRemoteDir)) {
+            ftp_close($conn_id);
+            return [ 'error' => "Failed to create user folder on FTP server." ];
+        }
+    }
+    return [ 'connection' => $conn_id, 'userRemoteDir' => $userRemoteDir ];
+}
+
 // Handle AJAX file upload request
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['file'])) {
+    // Setup FTP connection and user directory
+    $ftpSetup = setupFtpUserDir($ftp_server, $ftp_username, $ftp_password, $remoteBaseDir, $userId);
+    if (isset($ftpSetup['error'])) {
+        header('Content-Type: application/json');
+        echo json_encode(["status" => "error", "message" => $ftpSetup['error']]);
+        exit;
+    }
+
+    $conn_id       = $ftpSetup['connection'];
+    $userRemoteDir = $ftpSetup['userRemoteDir'];
+    
     $response = [];
-    $file = $_FILES['file'];
+    $file     = $_FILES['file'];
     if ($file['error'] === UPLOAD_ERR_OK) {
         $originalName = basename($file['name']);
-        $targetFile = $uploadDir . '/' . $originalName;
-        if (move_uploaded_file($file['tmp_name'], $targetFile)) {
-            // Generate security ID and store in a sidecar file
-            $secFile = $targetFile . '.sec';
+        
+        // Use temporary file path from PHP upload (local file)
+        $tempPath = $file['tmp_name'];
+
+        // Set remote file path inside the user's folder
+        $remoteFile = rtrim($userRemoteDir, '/') . '/' . $originalName;
+        
+        // Upload file to the remote FTP host in binary mode
+        if (ftp_put($conn_id, $remoteFile, $tempPath, FTP_BINARY)) {
+            // Generate a unique security id and create a corresponding .sec file on remote host
             $uniqueId = generateRandomId();
-            file_put_contents($secFile, $uniqueId);
-            // Prepare file details for response
-            $mimeType = mime_content_type($targetFile);
-            $uploadTime = date("Y-m-d H:i:s", filectime($targetFile));
-            $modifyTime = date("Y-m-d H:i:s", filemtime($targetFile));
+            $remoteSecFile = $remoteFile . '.sec';
+
+            // Create a temporary file to hold the security ID
+            $tempSecFile = tempnam(sys_get_temp_dir(), 'sec');
+            file_put_contents($tempSecFile, $uniqueId);
+
+            // Upload the security file using ASCII mode
+            ftp_put($conn_id, $remoteSecFile, $tempSecFile, FTP_ASCII);
+            // Remove the temporary security file from server
+            unlink($tempSecFile);
+
+            // Prepare a response with some basic file details
+            // Basic file times from FTP are generally not available via ftp_* functions,
+            // so we simply return the upload time as the current time.
+            $uploadTime = date("Y-m-d H:i:s");
+
             $response = [
-                "status" => "success",
-                "filename" => $originalName,
-                "mimeType" => $mimeType,
+                "status"     => "success",
+                "filename"   => $originalName,
                 "uploadTime" => $uploadTime,
-                "modifyTime" => $modifyTime,
-                "uniqueId" => $uniqueId
+                "uniqueId"   => $uniqueId,
+                "remoteFile" => $remoteFile
             ];
         } else {
-            $response = ["status" => "error", "message" => "خطا در آپلود فایل."];
+            $response = ["status" => "error", "message" => "Failed to upload file to FTP server."];
         }
     } else {
-        $response = ["status" => "error", "message" => "خطای آپلود: " . $file['error']];
+        $response = ["status" => "error", "message" => "File upload error: " . $file['error']];
     }
+    ftp_close($conn_id);
     header('Content-Type: application/json');
     echo json_encode($response);
     exit;
@@ -117,47 +192,39 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['file'])) {
       <input id="file" type="file" name="file"/>
     </label>
   </form>
-  
-  
-  
+
   <form class="file-upload-form" id="idfield">
   <label for="file" class="file-upload-field">
     <div class="file-upload-design">
-      <svg  viewBox="0 0 24 24" height="1em" >
-<path fill-rule="evenodd" clip-rule="evenodd" d="M3.46447 20.5355C4.92893 22 7.28595 22 12 22C16.714 22 19.0711 22 20.5355 20.5355C22 19.0711 22 16.714 22 12C22 7.28595 22 4.92893 20.5355 3.46447C19.0711 2 16.714 2 12 2C7.28595 2 4.92893 2 3.46447 3.46447C2 4.92893 2 7.28595 2 12C2 16.714 2 19.0711 3.46447 20.5355ZM9.5 8.75C7.70507 8.75 6.25 10.2051 6.25 12C6.25 13.7949 7.70507 15.25 9.5 15.25C11.2949 15.25 12.75 13.7949 12.75 12C12.75 11.5858 13.0858 11.25 13.5 11.25C13.9142 11.25 14.25 11.5858 14.25 12C14.25 14.6234 12.1234 16.75 9.5 16.75C6.87665 16.75 4.75 14.6234 4.75 12C4.75 9.37665 6.87665 7.25 9.5 7.25C9.91421 7.25 10.25 7.58579 10.25 8C10.25 8.41421 9.91421 8.75 9.5 8.75ZM17.75 12C17.75 13.7949 16.2949 15.25 14.5 15.25C14.0858 15.25 13.75 15.5858 13.75 16C13.75 16.4142 14.0858 16.75 14.5 16.75C17.1234 16.75 19.25 14.6234 19.25 12C19.25 9.37665 17.1234 7.25 14.5 7.25C11.8766 7.25 9.75 9.37665 9.75 12C9.75 12.4142 10.0858 12.75 10.5 12.75C10.9142 12.75 11.25 12.4142 11.25 12C11.25 10.2051 12.7051 8.75 14.5 8.75C16.2949 8.75 17.75 10.2051 17.75 12Z"/>
-</svg>
+      <svg viewBox="0 0 24 24" height="1em">
+        <path fill-rule="evenodd" clip-rule="evenodd" d="M3.46447 20.5355C4.92893 22 7.28595 22 12 22C16.714 22 19.0711 22 20.5355 20.5355C22 19.0711 22 16.714 22 12C22 7.28595 22 4.92893 20.5355 3.46447C19.0711 2 16.714 2 12 2C7.28595 2 4.92893 2 3.46447 3.46447C2 4.92893 2 7.28595 2 12C2 16.714 2 19.0711 3.46447 20.5355ZM9.5 8.75C7.70507 8.75 6.25 10.2051 6.25 12C6.25 13.7949 7.70507 15.25 9.5 15.25C11.2949 15.25 12.75 13.7949 12.75 12C12.75 11.5858 13.0858 11.25 13.5 11.25C13.9142 11.25 14.25 11.5858 14.25 12C14.25 14.6234 12.1234 16.75 9.5 16.75C6.87665 16.75 4.75 14.6234 4.75 12C4.75 9.37665 6.87665 7.25 9.5 7.25C9.91421 7.25 10.25 7.58579 10.25 8C10.25 8.41421 9.91421 8.75 9.5 8.75ZM17.75 12C17.75 13.7949 16.2949 15.25 14.5 15.25C14.0858 15.25 13.75 15.5858 13.75 16C13.75 16.4142 14.0858 16.75 14.5 16.75C17.1234 16.75 19.25 14.6234 19.25 12C19.25 9.37665 17.1234 7.25 14.5 7.25C11.8766 7.25 9.75 9.37665 9.75 12C9.75 12.4142 10.0858 12.75 10.5 12.75C10.9142 12.75 11.25 12.4142 11.25 12C11.25 10.2051 12.7051 8.75 14.5 8.75C16.2949 8.75 17.75 10.2051 17.75 12Z"/>
+      </svg>
       <p>Enter the 12-digit ID.</p>
       <input type="text" style="width:80%; background-color:#666; margin-top: 12px; font-size:12px; border-radius:10px; color:#eee; transition:all 0.3s; border:none; padding:5px; text-align:center;" placeholder="12-digit ID" />
- 
     </div>
   </label>
 </form>
-  
-  
-  
  </div>
+
  <div id="loaderbar" class="loaderbar">
   <!-- Loader for file checking -->
   <div id="checkingLoader" class="lds-ellipsis" style="display:none;">
     <div></div><div></div><div></div><div></div>
   </div>
-
   <!-- Progress loader for upload -->
   <div id="uploadLoader" class="upload-loader" style="display:none;">
     <div class="progress-container">
-      <div id="progressBar" class="progress" data-percentage="100%"></div>
+      <div id="progressBar" class="progress" data-percentage="0%"></div>
     </div>
- </div>
+  </div>
  </div>
  
-  <!-- Table for file details -->
-  <table id="fileTable" border="1" cellspacing="0" cellpadding="5" style="margin-top:20px;">
+ <!-- Table for file details -->
+ <table id="fileTable" border="1" cellspacing="0" cellpadding="5" style="margin-top:20px;">
     <thead>
       <tr>
         <th>Filename</th>
-        <th>File Type</th>
         <th>Upload Time</th>
-        <th>Modify Time</th>
         <th>Security ID</th>
         <th>Download</th>
       </tr>
@@ -167,8 +234,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['file'])) {
     </tbody>
   </table>
 
-  <!-- Download Modal -->
-  <div id="downloadModal" class="modal">
+ <!-- Download Modal -->
+ <div id="downloadModal" class="modal">
     <div class="modal-content">
       <span class="close">&times;</span>
       <div id="downloadLinkContainer" style="background: #ccc; padding: 10px; margin-bottom: 15px; word-break: break-all;"></div>
@@ -177,133 +244,128 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['file'])) {
          <button id="downloadButton">Download</button>
       </div>
     </div>
-  </div>
+ </div>
+
 <script src="<?php echo plugins_url( 'lib/filemanager-script.js', __FILE__ ); ?>"></script>
-  <script>
-    const fileInput = document.getElementById('file');
-    const checkingLoader = document.getElementById('checkingLoader');
-    const uploadLoader = document.getElementById('uploadLoader');
-    const progressBar = document.getElementById('progressBar');
-    const fileTableBody = document.querySelector('#fileTable tbody');
-    const downloadModal = document.getElementById('downloadModal');
-    const downloadLinkContainer = document.getElementById('downloadLinkContainer');
-    const copyLinkButton = document.getElementById('copyLinkButton');
-    const downloadButton = document.getElementById('downloadButton');
-    const modalClose = document.querySelector('.close');
+<script>
+  const fileInput = document.getElementById('file');
+  const checkingLoader = document.getElementById('checkingLoader');
+  const uploadLoader = document.getElementById('uploadLoader');
+  const progressBar = document.getElementById('progressBar');
+  const fileTableBody = document.querySelector('#fileTable tbody');
+  const downloadModal = document.getElementById('downloadModal');
+  const downloadLinkContainer = document.getElementById('downloadLinkContainer');
+  const copyLinkButton = document.getElementById('copyLinkButton');
+  const downloadButton = document.getElementById('downloadButton');
+  const modalClose = document.querySelector('.close');
 
-    // Current download link placeholder
-    let currentDownloadLink = '';
+  // Current download link placeholder
+  let currentDownloadLink = '';
 
-    fileInput.addEventListener('change', () => {
-      if (fileInput.files.length === 0) return;
-      
-      // Show file checking loader
-      checkingLoader.style.display = 'block';
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files.length === 0) return;
+    
+    // Show file checking loader
+    checkingLoader.style.display = 'block';
 
-      // Simulate file checking delay (e.g., validation)
-      setTimeout(() => {
-        checkingLoader.style.display = 'none';
-        // Begin upload: show progress loader
-        uploadLoader.style.display = 'block';
-        simulateUpload(fileInput.files[0]);
-      }, 1000); // 1 second delay for checking
-    });
+    // Simulate file checking delay (e.g. validation)
+    setTimeout(() => {
+      checkingLoader.style.display = 'none';
+      // Begin upload: show progress loader and reset progress bar
+      progressBar.style.width = '0%';
+      progressBar.setAttribute('data-percentage', '0%');
+      uploadLoader.style.display = 'block';
+      simulateUpload(fileInput.files[0]);
+    }, 1000);
+  });
 
-    function simulateUpload(file) {
-      const formData = new FormData();
-      formData.append('file', file);
-      
-      // Create an AJAX request for uploading file
-      const xhr = new XMLHttpRequest();
-      xhr.open('POST', '', true);
+  function simulateUpload(file) {
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '', true);
 
-      // Update progress simulation
-      xhr.upload.onprogress = function(event) {
-        if (event.lengthComputable) {
-          const percentComplete = Math.round((event.loaded / event.total) * 100);
-          progressBar.style.width = percentComplete + '%';
-        }
-      };
+    xhr.upload.onprogress = function(event) {
+      if (event.lengthComputable) {
+        const percentComplete = Math.round((event.loaded / event.total) * 100);
+        progressBar.style.width = percentComplete + '%';
+        progressBar.setAttribute('data-percentage', percentComplete + '%');
+      }
+    };
 
-      xhr.onload = function() {
-        if (xhr.status === 200) {
-          const response = JSON.parse(xhr.responseText);
-          if (response.status === "success") {
-            // Reset progress bar
-            progressBar.style.width = '100%';
-            setTimeout(() => {
-              uploadLoader.style.display = 'none';
-              addFileRow(response);
-            }, 500);
-          } else {
-            alert(response.message);
+    xhr.onload = function() {
+      if (xhr.status === 200) {
+        const response = JSON.parse(xhr.responseText);
+        if (response.status === "success") {
+          progressBar.style.width = '100%';
+          progressBar.setAttribute('data-percentage', '100%');
+          setTimeout(() => {
             uploadLoader.style.display = 'none';
-          }
+            addFileRow(response);
+          }, 500);
         } else {
-          alert('خطا در برقراری ارتباط با سرور.');
+          alert(response.message);
           uploadLoader.style.display = 'none';
         }
-      };
-
-      xhr.send(formData);
-    }
-
-    function addFileRow(fileData) {
-      const row = document.createElement('tr');
-      // Compute download link (assuming file is served from uploads directory)
-      const downloadLink = 'uploads/' + fileData.filename;
-      row.innerHTML = `
-        <td>${fileData.filename}</td>
-        <td>${fileData.mimeType}</td>
-        <td>${fileData.uploadTime}</td>
-        <td>${fileData.modifyTime}</td>
-        <td>${fileData.uniqueId}</td>
-        <td><button class="download-btn" data-link="${downloadLink}">Download</button></td>
-      `;
-      fileTableBody.appendChild(row);
-      // Reset file input
-      document.getElementById('uploadForm').reset();
-    }
-
-    // Event delegation for download buttons in the table
-    fileTableBody.addEventListener('click', function(event) {
-      if (event.target.classList.contains('download-btn')) {
-        const link = event.target.getAttribute('data-link');
-        showDownloadModal(link);
+      } else {
+        alert('Error connecting to the server.');
+        uploadLoader.style.display = 'none';
       }
-    });
+    };
 
-    function showDownloadModal(link) {
-      currentDownloadLink = link;
-      downloadLinkContainer.innerText = link;
-      downloadModal.style.display = 'block';
+    xhr.send(formData);
+  }
+
+  function addFileRow(fileData) {
+    const row = document.createElement('tr');
+    // Construct download link for the uploaded file.
+    // This link points to the remote FTP-hosted file.
+    const downloadLink = 'https://3117204741.cloudydl.com:3333/CMD_FILE_MANAGER/domains/pz%32%31%33%30%31.parspack.net/public%5Fhtml/betterme/' + fileData.filename;
+    row.innerHTML = `
+      <td>${fileData.filename}</td>
+      <td>${fileData.uploadTime}</td>
+      <td>${fileData.uniqueId}</td>
+      <td><button class="download-btn" data-link="${downloadLink}">Download</button></td>
+    `;
+    fileTableBody.appendChild(row);
+    document.getElementById('uploadForm').reset();
+  }
+
+  fileTableBody.addEventListener('click', function(event) {
+    if (event.target.classList.contains('download-btn')) {
+      const link = event.target.getAttribute('data-link');
+      showDownloadModal(link);
     }
+  });
 
-    // Copy link functionality
-    copyLinkButton.addEventListener('click', () => {
-      navigator.clipboard.writeText(currentDownloadLink).then(() => {
-        alert('Link copied to clipboard!');
-      }).catch(err => {
-        alert('Failed to copy text: ' + err);
-      });
+  function showDownloadModal(link) {
+    currentDownloadLink = link;
+    downloadLinkContainer.innerText = link;
+    downloadModal.style.display = 'block';
+  }
+
+  copyLinkButton.addEventListener('click', () => {
+    navigator.clipboard.writeText(currentDownloadLink).then(() => {
+      alert('Link copied to clipboard!');
+    }).catch(err => {
+      alert('Failed to copy text: ' + err);
     });
+  });
 
-    // Download button functionality
-    downloadButton.addEventListener('click', () => {
-      window.location.href = currentDownloadLink;
-    });
+  downloadButton.addEventListener('click', () => {
+    window.location.href = currentDownloadLink;
+  });
 
-    // When the user clicks on <span> (x), close the modal
-    modalClose.addEventListener('click', () => {
+  modalClose.addEventListener('click', () => {
+    downloadModal.style.display = 'none';
+  });
+
+  window.addEventListener('click', event => {
+    if (event.target === downloadModal) {
       downloadModal.style.display = 'none';
-    });
-
-    // Close modal if user clicks outside modal-content
-    window.addEventListener('click', event => {
-      if (event.target == downloadModal) {
-        downloadModal.style.display = 'none';
-      }
-    });
-  </script>
+    }
+  });
+</script>
 </body>
 </html>
